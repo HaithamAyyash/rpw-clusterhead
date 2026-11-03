@@ -1,6 +1,6 @@
 # RPW cluster head (ESP32)
 
-Firmware for the NAKHEL cluster head. It receives Red Palm Weevil sensor data from the nodes over LoRa, buffers it, and delivers it to the cloud server over Wi-Fi.
+Firmware for the NAKHEL cluster head. It receives infestation results from the nodes over LoRa, buffers it, and delivers it to the cloud server over Wi-Fi.
 
 ```
 nodes --LoRa--> src/lora_receiver.cpp --> buffer --> uplink with ARQ --HTTP(S)--> server
@@ -8,7 +8,7 @@ nodes --LoRa--> src/lora_receiver.cpp --> buffer --> uplink with ARQ --HTTP(S)--
                                           replace it
 ```
 
-**The uplink is finished: it talks to the server, handles retries and sends health reports. What's left is the LoRa side**, which is the three TODOs in `src/lora_receiver.cpp`, plus a decision about the buffer.
+**The uplink is finished: it talks to the server, handles retries and sends health reports. What's left is the LoRa side**, which is the two TODOs in `src/lora_receiver.cpp`, plus a decision about the buffer.
 
 Status: the uplink has been tested on a PC against the real server, and the ESP32 build compiles. **It hasn't run on a real ESP32 yet, so step 4 below is also the first test of its Wi-Fi and networking code.**
 
@@ -48,7 +48,7 @@ pio run -e esp32dev -t upload -t monitor        # real firmware
 
 | Build | Use it for |
 |---|---|
-| `esp32dev_demo` | Testing the uplink with no radio. Adds a fake measurement from node 1 every minute. **Never deploy this: it puts fake data in the real database** |
+| `esp32dev_demo` | Testing the uplink with no radio. Adds a fake low-confidence result from node 1 every minute. **Never deploy this: it puts fake data in the real database** |
 | `esp32dev` | The real firmware. It sends only cluster health until your receiver is filled in |
 
 ## 4. Check the uplink before writing any LoRa code
@@ -72,17 +72,24 @@ Flash `esp32dev_demo` and watch the serial monitor (115200 baud). Node 1 must be
 
 ## 5. What you need to implement
 
-All three TODOs are in `src/lora_receiver.cpp`. The skeleton already runs in its own task on core 1, builds the record and adds it to the buffer.
+Both TODOs are in `src/lora_receiver.cpp`. The skeleton already runs in its own task on core 1, builds the record and adds it to the buffer.
 
-**TODO 1: `RawPacket`.** Replace it with your packet layout.
+**TODO 1: `RawPacket`.** Replace it with your packet layout. The model's result is a single 32-bit float, `confidence`.
 
 **TODO 2: `receivePacket()`.** Set up the radio, and return `true` once a complete packet has been copied in. Add your LoRa library under `lib_deps` in `platformio.ini`, in the `[esp32]` section.
 - Check the packet (CRC, for example) before returning it, since the server can't tell whether a value is corrupted.
 - An interrupt must only set a flag or notify the task. **`push()` isn't safe to call from an interrupt.**
 
-**TODO 3: `convertMfcc()`.** Fill `out.mfcc[30][13]` with floats: 30 frames, 13 coefficients each.
-- **To agree with the team:** the nodes send 15 × 13 int8 values plus a scale, and the server requires exactly 30 × 13. How to get from one to the other isn't defined yet, and it has to match what the model expects.
-- NaN or infinity makes the whole record invalid: it is dropped without being sent.
+### The confidence value
+
+- **It must be the probability of infestation, from 0 to 1.** 0.95 means almost certainly infested, never "95% sure it's healthy". The dashboard's thresholds and alert emails depend on this.
+- **Send every result, including healthy ones.** A tree's status is the average of its last 3 results, so a tree that only reports detections can never recover.
+- **Read it from the packet with `memcpy`, not a pointer cast:** the float may not be aligned in the packet buffer. Both ends must also agree on byte order.
+- NaN, infinity or a value outside 0 to 1 makes the record invalid: it is dropped without being sent and logged as `invalid_locally`. A dropped record usually means a corrupted or misread packet.
+
+### The model version
+
+The packet doesn't carry one, so `kNodeModelVersion` at the top of `src/lora_receiver.cpp` is sent with every result. **Change it whenever the nodes get a new model**, or the dashboard can't tell the results apart. It may hold up to 31 letters, digits, `.`, `_` or `-`.
 
 ### The timestamp rules
 
@@ -108,13 +115,13 @@ The default buffer, `RamQueue` in `src/app_queue.h`, works as is. Its limits are
 | Limit | What happens |
 |---|---|
 | Stored in RAM | **A reboot or power cut loses everything waiting in it** |
-| 32 records, about 1.6 KB each | When full, new packets are refused and logged. At one packet per node per hour, that may fill quickly during an outage |
+| 512 records, about 100 bytes each | When full, new packets are refused and logged. At one packet per node per hour, 4 nodes take about 5 days to fill it and 255 nodes take about 2 hours |
 
-ARQ protects data against network failures, not against power loss. If that matters for your deployment, write your own buffer. Changing `kQueueRecords` is a smaller option, but keep RAM free for HTTPS, which needs tens of KB per connection.
+ARQ protects data against network failures, not against power loss. If that matters for your deployment, write your own buffer. Raising `kQueueRecords` buys more time during an outage, but keep RAM free for HTTPS, which needs tens of KB per connection.
 
 ### Writing your own buffer
 
-Flash (LittleFS) or an SD card works. Storing raw packets (about 214 bytes) rather than floats (about 1.6 KB) holds about 7 times as many, and you can convert them inside `peek()`.
+Flash (LittleFS) or an SD card works.
 
 Implement this interface from `lib/nakhel_uplink/src/uplink_queue.h`:
 

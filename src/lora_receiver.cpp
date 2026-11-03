@@ -1,8 +1,10 @@
-// The LoRa side of the cluster head: fill in the three TODOs. README.md explains each one.
+// The LoRa side of the cluster head: fill in the two TODOs. README.md explains each one.
 #include "lora_receiver.h"
 
 #include <Arduino.h>
 #include <time.h>
+
+#include <cstdio>
 
 #include "app_queue.h"
 
@@ -10,10 +12,14 @@ namespace {
 
 constexpr uint32_t kReceiverStackBytes = 8192;
 constexpr uint32_t kIdleDelayMs = 10;
+// The model on the nodes. Change this whenever they get a new model, so the dashboard can tell results
+// apart. Letters, digits, '.', '_' and '-' only.
+constexpr const char* kNodeModelVersion = "node-model-1";
 
 // TODO(LoRa) 1: replace with your packet layout.
 struct RawPacket {
   uint8_t nodeId = 0;
+  float confidence = 0;  // probability of infestation, 0 to 1
   int16_t rssiDbm = 0;
   float snrDb = 0;
 };
@@ -25,16 +31,9 @@ bool receivePacket(RawPacket& packet) {
   return false;
 }
 
-// TODO(LoRa) 3: turn the packet's values into the 30 x 13 floats the server expects.
-void convertMfcc(const RawPacket& packet, nakhel::Measurement& out) {
-  (void)packet;
-  (void)out;
-}
-
 void receiverTask(void* /*unused*/) {
-  // Static: at about 1.6 KB, these are too big to keep on this task's stack comfortably.
-  static RawPacket packet;
-  static nakhel::UplinkRecord record;
+  RawPacket packet;
+  nakhel::UplinkRecord record;
 
   for (;;) {
     if (!receivePacket(packet)) {
@@ -52,13 +51,14 @@ void receiverTask(void* /*unused*/) {
     record.kind = nakhel::UplinkRecord::Kind::Measurement;
     nakhel::Measurement& m = record.measurement;
     m.nodeId = packet.nodeId;
+    m.confidence = packet.confidence;
+    snprintf(m.modelVersion, sizeof(m.modelVersion), "%s", kNodeModelVersion);
     m.timestampS = now;  // use the node's own recording time instead if the packet carries one
     m.receivedAtS = now;
     m.hasRssi = true;
     m.rssiDbm = packet.rssiDbm;
     m.hasSnr = true;
     m.snrDb = packet.snrDb;
-    convertMfcc(packet, m);
 
     if (!uplinkQueue.push(record)) {
       Serial.printf("[lora] packet from node %u dropped: buffer full\n", packet.nodeId);

@@ -6,7 +6,7 @@
 
 #include "ram_queue.h"
 
-constexpr size_t kQueueRecords = 32;  // about 1.6 KB of RAM each
+constexpr size_t kQueueRecords = 512;  // about 100 bytes of RAM each
 constexpr int64_t kClockSetAfterS = 1704067200;  // 2024-01-01: anything earlier means no NTP yet
 
 using AppQueue = nakhel::RamQueue<kQueueRecords>;

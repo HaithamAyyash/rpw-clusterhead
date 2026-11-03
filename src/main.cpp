@@ -4,6 +4,7 @@
 #include <esp_random.h>
 #include <time.h>
 
+#include <cstdio>
 #include <cstring>
 
 #include "app_queue.h"
@@ -72,10 +73,9 @@ void pushDemoMeasurement() {
   record.measurement = nakhel::Measurement();
   record.measurement.nodeId = kDemoNodeId;
   record.measurement.timestampS = platform.epochSeconds();
-  for (auto& frame : record.measurement.mfcc) {
-    frame[0] = -300.0F + static_cast<float>(esp_random() % 100) / 10.0F;
-    for (int c = 1; c < nakhel::kMfccCoeffs; ++c) frame[c] = static_cast<float>(esp_random() % 200) / 10.0F - 10.0F;
-  }
+  // Always a low score, so the demo can't raise infestation alerts or send email.
+  record.measurement.confidence = static_cast<float>(esp_random() % 300) / 1000.0F;
+  snprintf(record.measurement.modelVersion, sizeof(record.measurement.modelVersion), "demo-FAKE");
   const bool queued = uplinkQueue.push(record);
   Serial.printf("[demo] measurement %s, %u waiting\n", queued ? "queued" : "dropped: queue full",
                 static_cast<unsigned>(uplinkQueue.count()));

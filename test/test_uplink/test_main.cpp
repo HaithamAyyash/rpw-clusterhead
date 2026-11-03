@@ -74,6 +74,8 @@ UplinkRecord measurement(uint8_t node, int64_t ts = kTs) {
   UplinkRecord record;
   record.measurement.nodeId = node;
   record.measurement.timestampS = ts;
+  record.measurement.confidence = 0.25F;
+  snprintf(record.measurement.modelVersion, sizeof(record.measurement.modelVersion), "node-1.0");
   return record;
 }
 
@@ -150,7 +152,7 @@ void test_no_answer_keeps_the_record_and_blocks_the_next_one() {
 void test_retransmission_is_byte_identical() {
   Rig rig;
   auto record = measurement(9);
-  record.measurement.mfcc[3][4] = -312.4F;
+  record.measurement.confidence = 0.8125F;
   rig.queue.push(record);
   rig.step();
   rig.platform.now += 3600;  // the clock moves on, but the timestamp must not
@@ -337,15 +339,64 @@ void test_refused_key_stops_sending_and_keeps_the_buffer() {
   TEST_ASSERT_TRUE(rig.platform.logged("API key refused"));
 }
 
-void test_a_nan_is_rejected_locally_and_never_sent() {
-  Rig rig;
-  auto bad = measurement(1);
-  bad.measurement.mfcc[0][0] = std::numeric_limits<float>::quiet_NaN();
-  rig.queue.push(bad);
-  rig.step();
-  TEST_ASSERT_EQUAL_UINT(0, rig.transport.bodies.size());
-  TEST_ASSERT_EQUAL_UINT(0, rig.queue.count());
-  TEST_ASSERT_EQUAL_STRING("invalid_locally", rig.platform.rejectedReasons[0].c_str());
+void test_a_bad_confidence_is_rejected_locally_and_never_sent() {
+  const float values[] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), 1.01F, -0.01F};
+  for (float value : values) {
+    Rig rig;
+    auto bad = measurement(1);
+    bad.measurement.confidence = value;
+    rig.queue.push(bad);
+    rig.step();
+    TEST_ASSERT_EQUAL_UINT(0, rig.transport.bodies.size());
+    TEST_ASSERT_EQUAL_UINT(0, rig.queue.count());
+    TEST_ASSERT_EQUAL_STRING("invalid_locally", rig.platform.rejectedReasons[0].c_str());
+  }
+}
+
+void test_a_bad_model_version_is_rejected_locally() {
+  const char* versions[] = {"", "has space", "quote\"", "back\\slash"};
+  for (const char* version : versions) {
+    Rig rig;
+    auto bad = measurement(1);
+    snprintf(bad.measurement.modelVersion, sizeof(bad.measurement.modelVersion), "%s", version);
+    rig.queue.push(bad);
+    rig.step();
+    TEST_ASSERT_EQUAL_UINT(0, rig.transport.bodies.size());
+    TEST_ASSERT_EQUAL_UINT(0, rig.queue.count());
+  }
+}
+
+void test_a_model_version_with_no_terminator_is_refused() {
+  static char body[kBodyBytes];
+  Measurement m;
+  memset(m.modelVersion, 'a', sizeof(m.modelVersion));
+  TEST_ASSERT_EQUAL_size_t(0, buildMeasurement(m, body, sizeof(body)));
+}
+
+void test_the_edges_of_the_confidence_range_are_valid() {
+  static char body[kBodyBytes];
+  Measurement m;
+  snprintf(m.modelVersion, sizeof(m.modelVersion), "node-1.0");
+  m.confidence = 0.0F;
+  TEST_ASSERT_GREATER_THAN_size_t(0, buildMeasurement(m, body, sizeof(body)));
+  TEST_ASSERT_NOT_NULL(strstr(body, "\"confidence\":0,"));
+  m.confidence = 1.0F;
+  TEST_ASSERT_GREATER_THAN_size_t(0, buildMeasurement(m, body, sizeof(body)));
+  TEST_ASSERT_NOT_NULL(strstr(body, "\"confidence\":1,"));
+}
+
+void test_the_body_holds_the_result_and_no_matrix() {
+  static char body[kBodyBytes];
+  Measurement m;
+  m.nodeId = 7;
+  m.timestampS = kTs;
+  m.confidence = 0.85F;
+  snprintf(m.modelVersion, sizeof(m.modelVersion), "node-1.0");
+  TEST_ASSERT_GREATER_THAN_size_t(0, buildMeasurement(m, body, sizeof(body)));
+  TEST_ASSERT_NOT_NULL(strstr(body, "\"node_id\":7,"));
+  TEST_ASSERT_NOT_NULL(strstr(body, "\"confidence\":0.85,"));
+  TEST_ASSERT_NOT_NULL(strstr(body, "\"model_version\":\"node-1.0\""));
+  TEST_ASSERT_NULL(strstr(body, "mfcc"));
 }
 
 // ---------- Cluster health ----------
@@ -439,9 +490,8 @@ void test_worst_case_measurement_fits_the_body_buffer() {
   m.snrDb = -3.3333333e38F;
   m.hasRssi = true;
   m.rssiDbm = -200;
-  for (auto& frame : m.mfcc) {
-    for (float& value : frame) value = -3.3333333e38F;
-  }
+  m.confidence = 0.33333334F;
+  memset(m.modelVersion, 'a', sizeof(m.modelVersion) - 1);
   static char body[kBodyBytes];
   const size_t length = buildMeasurement(m, body, sizeof(body));
   TEST_ASSERT_GREATER_THAN_size_t(0, length);
@@ -450,16 +500,15 @@ void test_worst_case_measurement_fits_the_body_buffer() {
 
 void test_too_small_a_buffer_fails_cleanly() {
   Measurement m;
-  char body[100];
+  snprintf(m.modelVersion, sizeof(m.modelVersion), "node-1.0");
+  char body[20];
   TEST_ASSERT_EQUAL_size_t(0, buildMeasurement(m, body, sizeof(body)));
 }
 
-void test_out_of_range_required_value_is_refused_but_a_bad_optional_is_dropped() {
+void test_a_bad_optional_value_is_dropped() {
   static char body[kBodyBytes];
   Measurement m;
-  m.mfcc[1][1] = 3.402e38F;  // a valid float, but above the server's limit
-  TEST_ASSERT_EQUAL_size_t(0, buildMeasurement(m, body, sizeof(body)));
-  m.mfcc[1][1] = 0;
+  snprintf(m.modelVersion, sizeof(m.modelVersion), "node-1.0");
   m.hasRssi = true;
   m.rssiDbm = 21;
   m.hasSnr = true;
@@ -527,7 +576,11 @@ int main() {
   RUN_TEST(test_a_proxys_400_or_401_page_is_only_retried);
   RUN_TEST(test_a_cut_off_error_body_still_counts);
   RUN_TEST(test_refused_key_stops_sending_and_keeps_the_buffer);
-  RUN_TEST(test_a_nan_is_rejected_locally_and_never_sent);
+  RUN_TEST(test_a_bad_confidence_is_rejected_locally_and_never_sent);
+  RUN_TEST(test_a_bad_model_version_is_rejected_locally);
+  RUN_TEST(test_a_model_version_with_no_terminator_is_refused);
+  RUN_TEST(test_the_edges_of_the_confidence_range_are_valid);
+  RUN_TEST(test_the_body_holds_the_result_and_no_matrix);
   RUN_TEST(test_health_goes_out_on_schedule_and_counts_the_buffer);
   RUN_TEST(test_failed_health_is_not_retransmitted_and_does_not_block_data);
   RUN_TEST(test_health_still_goes_out_during_a_retry_wait);
@@ -537,7 +590,7 @@ int main() {
   RUN_TEST(test_iso_format_and_parse);
   RUN_TEST(test_worst_case_measurement_fits_the_body_buffer);
   RUN_TEST(test_too_small_a_buffer_fails_cleanly);
-  RUN_TEST(test_out_of_range_required_value_is_refused_but_a_bad_optional_is_dropped);
+  RUN_TEST(test_a_bad_optional_value_is_dropped);
   RUN_TEST(test_node_health_uses_its_own_path);
   RUN_TEST(test_full_queue_refuses_the_new_record_and_keeps_the_old);
   return UNITY_END();

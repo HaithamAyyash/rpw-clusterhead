@@ -62,6 +62,19 @@ class Writer {
 
 bool validReal(float value) { return std::isfinite(value) && std::fabs(value) <= kRealMax; }
 bool validRssi(int value) { return value >= -200 && value <= 20; }
+bool validConfidence(float value) { return std::isfinite(value) && value >= 0.0F && value <= 1.0F; }
+
+// Same rule as the server. Also keeps the hand-built JSON safe, since nothing here needs escaping.
+bool validModelVersion(const char* text) {
+  if (text[0] == '\0') return false;
+  for (size_t i = 0; i < kModelVersionBytes; ++i) {
+    const char c = text[i];
+    if (c == '\0') return true;
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+    if (!ok) return false;
+  }
+  return false;  // no terminator
+}
 
 }  // namespace
 
@@ -102,31 +115,19 @@ bool parseIso8601Utc(const char* text, int64_t& epochS) {
 }
 
 size_t buildMeasurement(const Measurement& m, char* out, size_t capacity) {
-  for (const auto& frame : m.mfcc) {
-    for (float value : frame) {
-      if (!validReal(value)) return 0;
-    }
-  }
+  if (!validConfidence(m.confidence) || !validModelVersion(m.modelVersion)) return 0;
   char iso[kIsoBytes];
   formatIso8601(m.timestampS, iso);
   Writer writer(out, capacity);
-  writer.add("{\"node_id\":%u,\"timestamp\":\"%s\"", m.nodeId, iso);
+  writer.add("{\"node_id\":%u,\"timestamp\":\"%s\",\"confidence\":%.7g,\"model_version\":\"%s\"", m.nodeId, iso,
+             static_cast<double>(m.confidence), m.modelVersion);
   if (m.receivedAtS != 0) {
     formatIso8601(m.receivedAtS, iso);
     writer.add(",\"received_at\":\"%s\"", iso);
   }
   if (m.hasSnr && validReal(m.snrDb)) writer.add(",\"snr_db\":%.7g", static_cast<double>(m.snrDb));
   if (m.hasRssi && validRssi(m.rssiDbm)) writer.add(",\"rssi_dbm\":%d", m.rssiDbm);
-  writer.add(",\"mfcc\":[");
-  for (int f = 0; f < kMfccFrames; ++f) {
-    writer.add(f == 0 ? "[" : ",[");
-    for (int c = 0; c < kMfccCoeffs; ++c) {
-      // 7 significant digits: floats that came from int8 values lose nothing that matters.
-      writer.add(c == 0 ? "%.7g" : ",%.7g", static_cast<double>(m.mfcc[f][c]));
-    }
-    writer.add("]");
-  }
-  writer.add("]}");
+  writer.add("}");
   return writer.finish();
 }
 

@@ -77,7 +77,7 @@ class Uplink {
   UplinkConfig config_;
   UplinkStats stats_;
 
-  // Members, not locals: together they are about 9 KB, too big for a task's stack.
+  // Members, not locals: together they are about 1.6 KB, which is a lot for a task's stack.
   UplinkRecord record_;
   char body_[kBodyBytes] = {};
   HttpResponse response_;
